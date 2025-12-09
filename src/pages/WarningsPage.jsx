@@ -15,7 +15,7 @@ const PRESETS = [
 const getDefaultFilters = (preset) => {
   switch (preset) {
     case 'complexity':
-      return { minWarnings: '1', severity: 'High', minDegree: '3' };
+      return { minWarnings: '1', minDegree: '3' };
     case 'severity':
       return { minComplexity: '5', minWarnings: '1' };
     case 'easy':
@@ -32,16 +32,6 @@ const FILTER_CONFIG = {
       label: '최소 경고 수',
       type: 'slider',
       metric: 'warningCount'
-    },
-    {
-      key: 'severity',
-      label: '집중할 심각도',
-      options: [
-        { value: 'any', label: '전체' },
-        { value: 'High', label: 'High' },
-        { value: 'Medium', label: 'Medium' },
-        { value: 'Low', label: 'Low' }
-      ]
     },
     {
       key: 'minDegree',
@@ -70,7 +60,7 @@ const FILTER_CONFIG = {
   easy: [
     {
       key: 'minComplexity',
-      label: '최소 복잡도',
+      label: '최대 복잡도',
       type: 'slider',
       metric: 'complexity'
     }
@@ -303,9 +293,6 @@ const WarningsPage = ({
       const minWarnings = Number(filters.minWarnings || 0);
       const minDegree = Number(filters.minDegree || 0);
       data = data.filter(func => func.warningCount >= minWarnings && func.degree >= minDegree);
-      if (filters.severity && filters.severity !== 'any') {
-        data = data.filter(func => func.severityCounts[filters.severity] > 0);
-      }
       data.sort((a, b) => b.complexity - a.complexity);
     } else if (selectedPreset === 'severity') {
       const minComplexity = Number(filters.minComplexity || 0);
@@ -344,7 +331,7 @@ const WarningsPage = ({
       // Easy Fixes preset: 항상 Low severity 경고가 1개 이상인 함수만 표시
       data = data.filter(func => func.easyFixCount >= 1);
       if (minComplexity) {
-        data = data.filter(func => func.complexity >= minComplexity);
+        data = data.filter(func => func.complexity <= minComplexity);
       }
       data.sort((a, b) => b.easyFixCount - a.easyFixCount);
     }
@@ -741,7 +728,7 @@ const WarningsPage = ({
                               <ul className="list-disc list-inside mt-0.5">
                                 <li>CC와 LOC가 모두 전체 함수의 하위 50%에 속하고 High 심각도 경고가 없는, 이미 충분히 단순한 함수들은 목록에서 제외합니다.</li>
                                 <li>그 반대로 상대적으로 복잡하거나 길거나 High 경고가 있는 함수들 중에서, 낮은 심각도(Low) 경고가 1개 이상 있는 함수만 표시됩니다.</li>
-                                <li>슬라이더로 설정한 최소 복잡도 값 이상인 함수만 남습니다. 값이 300일 경우 복잡도 300 이상인 함수만 표시됩니다.</li>
+                                <li>슬라이더로 설정한 최대 복잡도 값 이하인 함수만 남습니다. 값이 300일 경우 복잡도 300 이하인 함수만 표시됩니다.</li>
                                 <li>Easy-to-fix 경고 개수가 많은 함수부터 내림차순으로 정렬됩니다.</li>
                               </ul>
                             </div>
