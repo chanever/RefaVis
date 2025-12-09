@@ -91,6 +91,8 @@ const WarningsPage = ({
   const [selectionHistory, setSelectionHistory] = useState([]); // Array of function names (recent selections)
   const [isHistoryMode, setIsHistoryMode] = useState(false); // true = show selection history instead of filtered list
   const [graphResetCounter, setGraphResetCounter] = useState(0); // Force CallGraphWebGL remount on reset
+  const [easyComplexitySlider, setEasyComplexitySlider] = useState(null); // Local slider state for Easy Fixes preset
+  const easySliderTimeoutRef = useRef(null); // Debounce timer for Easy Fixes complexity slider
 
   const usingBackend = mode === 'backend';
 
@@ -244,6 +246,20 @@ const WarningsPage = ({
     };
   }, [functionsWithMetrics]);
 
+  // Easy Fixes 복잡도 슬라이더 값 초기화 및 동기화 (디바운스된 필터 적용용)
+  useEffect(() => {
+    if (selectedPreset !== 'easy') return;
+
+    const range = metricRanges.complexity || { min: 0, max: 0 };
+    const min = range.min ?? 0;
+    const max = range.max ?? 0;
+    let base = Number(filters.minComplexity ?? max);
+    if (!Number.isFinite(base)) base = max;
+    if (base < min) base = min;
+    if (base > max) base = max;
+    setEasyComplexitySlider(base);
+  }, [selectedPreset, metricRanges, filters.minComplexity]);
+
   // Easy Fixes용 기본 후보(단순 + 짧은 + High 경고 없음)를 위한 CC/LOC 하위 50% 기준 계산
   const easyFixBaseThresholds = useMemo(() => {
     if (!functionsWithMetrics.length) {
@@ -282,6 +298,39 @@ const WarningsPage = ({
     };
   }, [functionsWithMetrics]);
 
+  // Easy Fixes용 베이스 함수 집합 (너무 쉬운 함수 제외)를 미리 계산
+  const easyFixBaseFunctions = useMemo(() => {
+    if (!functionsWithMetrics.length) return [];
+    const { ccThreshold, locThreshold } = easyFixBaseThresholds;
+
+    if (ccThreshold === null || locThreshold === null) {
+      // 기준을 계산할 수 없으면 전체 함수 사용
+      return functionsWithMetrics;
+    }
+
+    return functionsWithMetrics.filter(func => {
+      const locMetric =
+        typeof func.NLOC === 'number' && func.NLOC > 0
+          ? func.NLOC
+          : typeof func.length === 'number' && func.length > 0
+            ? func.length
+            : null;
+
+      // LOC 정보를 알 수 없으면 "너무 쉬운" 기준에서 제외하지 않고 그대로 남김
+      if (locMetric === null) return true;
+
+      const hasHighWarning = (func.severityCounts.High || 0) > 0;
+
+      const isTooEasy =
+        func.complexity <= ccThreshold &&
+        locMetric <= locThreshold &&
+        !hasHighWarning;
+
+      // Easy Fixes 목록에서는 "너무 쉬운" 함수는 숨기고 나머지만 남긴다
+      return !isTooEasy;
+    });
+  }, [functionsWithMetrics, easyFixBaseThresholds]);
+
   const filteredFunctions = useMemo(() => {
     let data = [...functionsWithMetrics];
 
@@ -297,33 +346,8 @@ const WarningsPage = ({
       data = data.filter(func => func.complexity >= minComplexity && func.warningCount >= minWarnings);
       data.sort((a, b) => (b.severityCounts.High || 0) - (a.severityCounts.High || 0));
     } else if (selectedPreset === 'easy') {
-      const { ccThreshold, locThreshold } = easyFixBaseThresholds;
-      // 1단계: CC/LOC 하위 50% + High 경고 없음인 "너무 쉬운" 함수는 숨기고,
-      // 그 반대(더 복잡하거나, 더 길거나, High 경고가 있는 함수)를 우선적으로 표시
-      if (ccThreshold !== null && locThreshold !== null) {
-        data = data.filter(func => {
-          const locMetric =
-            typeof func.NLOC === 'number' && func.NLOC > 0
-              ? func.NLOC
-              : typeof func.length === 'number' && func.length > 0
-                ? func.length
-                : null;
-
-          // LOC 정보를 알 수 없으면 "너무 쉬운" 기준에서 제외하지 않고 그대로 남김
-          if (locMetric === null) return true;
-
-          const hasHighWarning = (func.severityCounts.High || 0) > 0;
-
-          const isTooEasy =
-            func.complexity <= ccThreshold &&
-            locMetric <= locThreshold &&
-            !hasHighWarning;
-
-          // Easy Fixes 목록에서는 "너무 쉬운" 함수는 숨기고 나머지만 남긴다
-          return !isTooEasy;
-        });
-      }
-
+      // Easy Fixes에서는 미리 계산된 베이스 함수 집합을 사용
+      data = [...easyFixBaseFunctions];
       const minComplexity = Number(filters.minComplexity || 0);
       // Easy Fixes preset: 항상 Low severity 경고가 1개 이상인 함수만 표시
       data = data.filter(func => func.easyFixCount >= 1);
@@ -784,6 +808,16 @@ const WarningsPage = ({
                                 : min;
                               const clampedValue = Math.min(Math.max(numericValue, min), max);
 
+                              const isEasyComplexitySlider =
+                                selectedPreset === 'easy' &&
+                                filter.metric === 'complexity' &&
+                                filter.key === 'minComplexity';
+
+                              const sliderValue =
+                                isEasyComplexitySlider && easyComplexitySlider !== null
+                                  ? Math.min(Math.max(easyComplexitySlider, min), max)
+                                  : clampedValue;
+
                               return (
                                 <>
                                   <input
@@ -791,17 +825,28 @@ const WarningsPage = ({
                                     min={min}
                                     max={max}
                                     step={10}
-                                    value={clampedValue}
-                                    onChange={(e) =>
-                                      handleFilterChange(filter.key, Number(e.target.value))
-                                    }
+                                    value={sliderValue}
+                                    onChange={(e) => {
+                                      const nextVal = Number(e.target.value);
+                                      if (isEasyComplexitySlider) {
+                                        setEasyComplexitySlider(nextVal);
+                                        if (easySliderTimeoutRef.current) {
+                                          clearTimeout(easySliderTimeoutRef.current);
+                                        }
+                                        easySliderTimeoutRef.current = setTimeout(() => {
+                                          handleFilterChange(filter.key, nextVal);
+                                        }, 200);
+                                      } else {
+                                        handleFilterChange(filter.key, nextVal);
+                                      }
+                                    }}
                                     className="w-full accent-primary"
                                   />
                                   <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
                                     <span>{min}</span>
                                     <span className="font-semibold text-gray-600">
-                                      값: {clampedValue}
-                                      {max === 300 && clampedValue === 300 ? '+' : ''}
+                                      값: {sliderValue}
+                                      {max === 300 && sliderValue === 300 ? '+' : ''}
                                     </span>
                                     <span>{max === 300 ? '300+' : max}</span>
                                   </div>
