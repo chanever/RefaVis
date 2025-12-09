@@ -19,7 +19,7 @@ const getDefaultFilters = (preset) => {
     case 'severity':
       return { minComplexity: '5', minWarnings: '1' };
     case 'easy':
-      return { maxComplexity: '12' };
+      return { minComplexity: '0' };
     default:
       return {};
   }
@@ -30,12 +30,8 @@ const FILTER_CONFIG = {
     {
       key: 'minWarnings',
       label: '최소 경고 수',
-      options: [
-        { value: '0', label: '전체' },
-        { value: '1', label: '1개 이상' },
-        { value: '2', label: '2개 이상' },
-        { value: '3', label: '3개 이상' }
-      ]
+      type: 'slider',
+      metric: 'warningCount'
     },
     {
       key: 'severity',
@@ -50,25 +46,16 @@ const FILTER_CONFIG = {
     {
       key: 'minDegree',
       label: '최소 연결도 (degree)',
-      options: [
-        { value: '0', label: '전체' },
-        { value: '2', label: '2+' },
-        { value: '3', label: '3+' },
-        { value: '4', label: '4+' },
-        { value: '6', label: '6+' }
-      ]
+      type: 'slider',
+      metric: 'degree'
     }
   ],
   severity: [
     {
       key: 'minComplexity',
       label: '최소 복잡도',
-      options: [
-        { value: '0', label: '전체' },
-        { value: '5', label: '5+' },
-        { value: '8', label: '8+' },
-        { value: '12', label: '12+' }
-      ]
+      type: 'slider',
+      metric: 'complexity'
     },
     {
       key: 'minWarnings',
@@ -82,15 +69,10 @@ const FILTER_CONFIG = {
   ],
   easy: [
     {
-      key: 'maxComplexity',
-      label: '최대 복잡도',
-      options: [
-        { value: '0', label: '제한 없음' },
-        { value: '6', label: '6 이하' },
-        { value: '10', label: '10 이하' },
-        { value: '12', label: '12 이하' },
-        { value: '14', label: '14 이하' }
-      ]
+      key: 'minComplexity',
+      label: '최소 복잡도',
+      type: 'slider',
+      metric: 'complexity'
     }
   ]
 };
@@ -246,6 +228,35 @@ const WarningsPage = ({
     });
   }, [functionsSource, warningsByFunction]);
 
+  // Metric ranges for slider filters (capped at 300 for upper bound)
+  const metricRanges = useMemo(() => {
+    if (!functionsWithMetrics.length) {
+      return {
+        warningCount: { min: 0, max: 0 },
+        degree: { min: 0, max: 0 },
+        complexity: { min: 0, max: 0 }
+      };
+    }
+
+    const computeRange = (values) => {
+      if (!values.length) return { min: 0, max: 0 };
+      const min = Math.min(...values);
+      let max = Math.max(...values);
+      if (max > 300) max = 300;
+      return { min, max };
+    };
+
+    const warningValues = functionsWithMetrics.map(func => func.warningCount || 0);
+    const degreeValues = functionsWithMetrics.map(func => func.degree || 0);
+    const complexityValues = functionsWithMetrics.map(func => func.complexity || 0);
+
+    return {
+      warningCount: computeRange(warningValues),
+      degree: computeRange(degreeValues),
+      complexity: computeRange(complexityValues)
+    };
+  }, [functionsWithMetrics]);
+
   // Easy Fixes용 기본 후보(단순 + 짧은 + High 경고 없음)를 위한 CC/LOC 하위 50% 기준 계산
   const easyFixBaseThresholds = useMemo(() => {
     if (!functionsWithMetrics.length) {
@@ -329,11 +340,11 @@ const WarningsPage = ({
         });
       }
 
-      const maxComplexity = Number(filters.maxComplexity || 0);
+      const minComplexity = Number(filters.minComplexity || 0);
       // Easy Fixes preset: 항상 Low severity 경고가 1개 이상인 함수만 표시
       data = data.filter(func => func.easyFixCount >= 1);
-      if (maxComplexity) {
-        data = data.filter(func => func.complexity <= maxComplexity);
+      if (minComplexity) {
+        data = data.filter(func => func.complexity >= minComplexity);
       }
       data.sort((a, b) => b.easyFixCount - a.easyFixCount);
     }
@@ -730,7 +741,7 @@ const WarningsPage = ({
                               <ul className="list-disc list-inside mt-0.5">
                                 <li>CC와 LOC가 모두 전체 함수의 하위 50%에 속하고 High 심각도 경고가 없는, 이미 충분히 단순한 함수들은 목록에서 제외합니다.</li>
                                 <li>그 반대로 상대적으로 복잡하거나 길거나 High 경고가 있는 함수들 중에서, 낮은 심각도(Low) 경고가 1개 이상 있는 함수만 표시됩니다.</li>
-                                <li>최대 복잡도를 제한하면 그 값 이하의 함수만 남습니다.</li>
+                                <li>슬라이더로 설정한 최소 복잡도 값 이상인 함수만 남습니다. 값이 300일 경우 복잡도 300 이상인 함수만 표시됩니다.</li>
                                 <li>Easy-to-fix 경고 개수가 많은 함수부터 내림차순으로 정렬됩니다.</li>
                               </ul>
                             </div>
@@ -771,17 +782,61 @@ const WarningsPage = ({
                       {FILTER_CONFIG[selectedPreset]?.map(filter => (
                         <div key={filter.key} className="flex flex-col text-xs gap-1 w-full">
                           <label className="font-medium text-gray-500 leading-tight text-[12px]">{filter.label}</label>
-                          <select
-                            value={filters[filter.key] || filter.options[0].value}
-                            onChange={(e) => handleFilterChange(filter.key, e.target.value)}
-                            className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:ring-2 focus:ring-primary focus:border-transparent transition-colors"
-                          >
-                            {filter.options.map(option => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
+                          {filter.type === 'slider' ? (
+                            (() => {
+                              let range = { min: 0, max: 0 };
+                              if (filter.metric === 'warningCount') {
+                                range = metricRanges.warningCount;
+                              } else if (filter.metric === 'degree') {
+                                range = metricRanges.degree;
+                              } else if (filter.metric === 'complexity') {
+                                range = metricRanges.complexity;
+                              }
+                              const min = range.min ?? 0;
+                              const max = range.max ?? 0;
+                              const rawValue = filters[filter.key] ?? min;
+                              const numericValue = Number.isFinite(Number(rawValue))
+                                ? Number(rawValue)
+                                : min;
+                              const clampedValue = Math.min(Math.max(numericValue, min), max);
+
+                              return (
+                                <>
+                                  <input
+                                    type="range"
+                                    min={min}
+                                    max={max}
+                                    step={10}
+                                    value={clampedValue}
+                                    onChange={(e) =>
+                                      handleFilterChange(filter.key, Number(e.target.value))
+                                    }
+                                    className="w-full accent-primary"
+                                  />
+                                  <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                                    <span>{min}</span>
+                                    <span className="font-semibold text-gray-600">
+                                      값: {clampedValue}
+                                      {max === 300 && clampedValue === 300 ? '+' : ''}
+                                    </span>
+                                    <span>{max === 300 ? '300+' : max}</span>
+                                  </div>
+                                </>
+                              );
+                            })()
+                          ) : (
+                            <select
+                              value={filters[filter.key] || filter.options[0].value}
+                              onChange={(e) => handleFilterChange(filter.key, e.target.value)}
+                              className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:ring-2 focus:ring-primary focus:border-transparent transition-colors"
+                            >
+                              {filter.options.map(option => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         </div>
                       ))}
                     </div>
