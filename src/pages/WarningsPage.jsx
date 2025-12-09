@@ -303,7 +303,8 @@ const WarningsPage = ({
       data.sort((a, b) => (b.severityCounts.High || 0) - (a.severityCounts.High || 0));
     } else if (selectedPreset === 'easy') {
       const { ccThreshold, locThreshold } = easyFixBaseThresholds;
-      // 1단계: 전체 함수 중 CC/LOC 하위 50%이면서 High 경고가 없는 함수만 남기기
+      // 1단계: CC/LOC 하위 50% + High 경고 없음인 "너무 쉬운" 함수는 숨기고,
+      // 그 반대(더 복잡하거나, 더 길거나, High 경고가 있는 함수)를 우선적으로 표시
       if (ccThreshold !== null && locThreshold !== null) {
         data = data.filter(func => {
           const locMetric =
@@ -313,19 +314,19 @@ const WarningsPage = ({
                 ? func.length
                 : null;
 
-          if (locMetric === null) return false;
+          // LOC 정보를 알 수 없으면 "너무 쉬운" 기준에서 제외하지 않고 그대로 남김
+          if (locMetric === null) return true;
 
           const hasHighWarning = (func.severityCounts.High || 0) > 0;
 
-          return (
+          const isTooEasy =
             func.complexity <= ccThreshold &&
             locMetric <= locThreshold &&
-            !hasHighWarning
-          );
+            !hasHighWarning;
+
+          // Easy Fixes 목록에서는 "너무 쉬운" 함수는 숨기고 나머지만 남긴다
+          return !isTooEasy;
         });
-      } else {
-        // CC/LOC 기준을 계산할 수 없는 경우에도 최소한 High 경고가 없는 함수만 남김
-        data = data.filter(func => (func.severityCounts.High || 0) === 0);
       }
 
       const maxComplexity = Number(filters.maxComplexity || 0);
@@ -727,8 +728,8 @@ const WarningsPage = ({
                             <div>
                               <span className="font-semibold text-xs text-green-700">Easy Fixes</span>
                               <ul className="list-disc list-inside mt-0.5">
-                                <li>CC와 LOC가 각각 전체 함수의 하위 50%에 속하면서 High 심각도 경고가 없는 함수들 중에서만 탐색합니다.</li>
-                                <li>그 중에서도 낮은 심각도(Low) 경고가 1개 이상 있는 함수만 표시됩니다.</li>
+                                <li>CC와 LOC가 모두 전체 함수의 하위 50%에 속하고 High 심각도 경고가 없는, 이미 충분히 단순한 함수들은 목록에서 제외합니다.</li>
+                                <li>그 반대로 상대적으로 복잡하거나 길거나 High 경고가 있는 함수들 중에서, 낮은 심각도(Low) 경고가 1개 이상 있는 함수만 표시됩니다.</li>
                                 <li>최대 복잡도를 제한하면 그 값 이하의 함수만 남습니다.</li>
                                 <li>Easy-to-fix 경고 개수가 많은 함수부터 내림차순으로 정렬됩니다.</li>
                               </ul>
