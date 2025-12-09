@@ -19,7 +19,7 @@ const getDefaultFilters = (preset) => {
     case 'severity':
       return { minComplexity: '5', minWarnings: '1' };
     case 'easy':
-      return { minEasyFix: '1', maxComplexity: '12' };
+      return { maxComplexity: '12' };
     default:
       return {};
   }
@@ -81,15 +81,6 @@ const FILTER_CONFIG = {
     }
   ],
   easy: [
-    {
-      key: 'minEasyFix',
-      label: 'Easy-to-fix 경고 수',
-      options: [
-        { value: '0', label: '전체' },
-        { value: '1', label: '1+' },
-        { value: '2', label: '2+' }
-      ]
-    },
     {
       key: 'maxComplexity',
       label: '최대 복잡도',
@@ -156,6 +147,33 @@ const WarningsPage = ({
   const warningsSource = usingBackend
     ? (backendWarnings || [])
     : sqliteWarnings;
+
+  const hasFunctionData = Array.isArray(functionsSource) && functionsSource.length > 0;
+  const hasWarningData = Array.isArray(warningsSource) && warningsSource.length > 0;
+
+  // 함수/경고 데이터가 존재하지 않을 때 에러 알림 표시
+  useEffect(() => {
+    if (usingBackend) {
+      // 백엔드 모드에서는 분석이 완료된 이후에만 데이터 유무를 체크
+      if (!backendGraphLoaded) return;
+      if (!hasFunctionData || !hasWarningData) {
+        setNotification({
+          type: 'error',
+          message:
+            '백엔드에서 함수 또는 경고 데이터를 불러오지 못했습니다. 분석 결과를 다시 확인하거나 파이프라인을 재실행해 주세요.',
+        });
+      }
+    } else {
+      // 로컬 모드에서 JSON이 비어 있거나 없는 경우
+      if (!hasFunctionData || !hasWarningData) {
+        setNotification({
+          type: 'error',
+          message:
+            '함수 또는 경고 데이터가 없습니다. sqlite_function.json과 sqlite_warning.json 파일을 확인해 주세요.',
+        });
+      }
+    }
+  }, [usingBackend, backendGraphLoaded, hasFunctionData, hasWarningData]);
 
   // Create a map of function name -> function data
   const functionDataMap = useMemo(() => {
@@ -228,6 +246,44 @@ const WarningsPage = ({
     });
   }, [functionsSource, warningsByFunction]);
 
+  // Easy Fixes용 기본 후보(단순 + 짧은 + High 경고 없음)를 위한 CC/LOC 하위 50% 기준 계산
+  const easyFixBaseThresholds = useMemo(() => {
+    if (!functionsWithMetrics.length) {
+      return { ccThreshold: null, locThreshold: null };
+    }
+
+    const ccValues = functionsWithMetrics
+      .map(func => func.complexity)
+      .filter(value => typeof value === 'number');
+
+    const locValues = functionsWithMetrics
+      .map(func => {
+        if (typeof func.NLOC === 'number' && func.NLOC > 0) {
+          return func.NLOC;
+        }
+        if (typeof func.length === 'number' && func.length > 0) {
+          return func.length;
+        }
+        return null;
+      })
+      .filter(value => value !== null);
+
+    if (!ccValues.length || !locValues.length) {
+      return { ccThreshold: null, locThreshold: null };
+    }
+
+    ccValues.sort((a, b) => a - b);
+    locValues.sort((a, b) => a - b);
+
+    const ccIndex = Math.max(Math.floor(ccValues.length * 0.5) - 1, 0);
+    const locIndex = Math.max(Math.floor(locValues.length * 0.5) - 1, 0);
+
+    return {
+      ccThreshold: ccValues[ccIndex],
+      locThreshold: locValues[locIndex]
+    };
+  }, [functionsWithMetrics]);
+
   const filteredFunctions = useMemo(() => {
     let data = [...functionsWithMetrics];
 
@@ -246,9 +302,35 @@ const WarningsPage = ({
       data = data.filter(func => func.complexity >= minComplexity && func.warningCount >= minWarnings);
       data.sort((a, b) => (b.severityCounts.High || 0) - (a.severityCounts.High || 0));
     } else if (selectedPreset === 'easy') {
-      const minEasyFix = Number(filters.minEasyFix || 0);
+      const { ccThreshold, locThreshold } = easyFixBaseThresholds;
+      // 1단계: 전체 함수 중 CC/LOC 하위 50%이면서 High 경고가 없는 함수만 남기기
+      if (ccThreshold !== null && locThreshold !== null) {
+        data = data.filter(func => {
+          const locMetric =
+            typeof func.NLOC === 'number' && func.NLOC > 0
+              ? func.NLOC
+              : typeof func.length === 'number' && func.length > 0
+                ? func.length
+                : null;
+
+          if (locMetric === null) return false;
+
+          const hasHighWarning = (func.severityCounts.High || 0) > 0;
+
+          return (
+            func.complexity <= ccThreshold &&
+            locMetric <= locThreshold &&
+            !hasHighWarning
+          );
+        });
+      } else {
+        // CC/LOC 기준을 계산할 수 없는 경우에도 최소한 High 경고가 없는 함수만 남김
+        data = data.filter(func => (func.severityCounts.High || 0) === 0);
+      }
+
       const maxComplexity = Number(filters.maxComplexity || 0);
-      data = data.filter(func => func.easyFixCount >= minEasyFix);
+      // Easy Fixes preset: 항상 Low severity 경고가 1개 이상인 함수만 표시
+      data = data.filter(func => func.easyFixCount >= 1);
       if (maxComplexity) {
         data = data.filter(func => func.complexity <= maxComplexity);
       }
@@ -645,7 +727,8 @@ const WarningsPage = ({
                             <div>
                               <span className="font-semibold text-xs text-green-700">Easy Fixes</span>
                               <ul className="list-disc list-inside mt-0.5">
-                                <li>낮은 심각도(Low) 경고 개수가 설정한 Easy-to-fix 기준 이상인 함수만 표시됩니다.</li>
+                                <li>CC와 LOC가 각각 전체 함수의 하위 50%에 속하면서 High 심각도 경고가 없는 함수들 중에서만 탐색합니다.</li>
+                                <li>그 중에서도 낮은 심각도(Low) 경고가 1개 이상 있는 함수만 표시됩니다.</li>
                                 <li>최대 복잡도를 제한하면 그 값 이하의 함수만 남습니다.</li>
                                 <li>Easy-to-fix 경고 개수가 많은 함수부터 내림차순으로 정렬됩니다.</li>
                               </ul>
@@ -948,10 +1031,21 @@ const WarningsPage = ({
                           </div>
                         );
                       })}
-                      {filteredFunctions.length === 0 && !(mode === 'backend' && (!backendFunctions || backendFunctions.length === 0)) && (
-                        <div className="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg p-4 text-center">
-                          선택된 조건을 만족하는 함수가 없습니다.
+                      {(
+                        // 데이터 자체가 없는 경우
+                        (!usingBackend && (!hasFunctionData || !hasWarningData)) ||
+                        (usingBackend && backendGraphLoaded && (!hasFunctionData || !hasWarningData))
+                      ) ? (
+                        <div className="text-sm text-red-500 border border-dashed border-red-200 rounded-lg p-4 text-center">
+                          함수 또는 경고 데이터가 없어 목록을 표시할 수 없습니다. 입력 데이터를 확인해 주세요.
                         </div>
+                      ) : (
+                        filteredFunctions.length === 0 &&
+                        !(mode === 'backend' && (!backendFunctions || backendFunctions.length === 0)) && (
+                          <div className="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg p-4 text-center">
+                            선택된 조건을 만족하는 함수가 없습니다.
+                          </div>
+                        )
                       )}
                     </div>
                   </div>
